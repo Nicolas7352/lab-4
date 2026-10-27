@@ -1,0 +1,353 @@
+Шаг 1: Добавление поля роли в таблицу users
+
+Сначала создайте файл миграции для добавления поля role в таблицу users.
+bash
+
+php artisan make:migration add_role_to_users_table --table=users
+
+После создания файла в database/migrations/ найдите метод up() и измените его следующим образом:
+php
+
+public function up(): void
+{
+    Schema::table('users', function (Blueprint $table) {
+        $table->enum('role', ['user', 'journalist', 'admin'])->default('user');
+    });
+}
+
+public function down(): void
+{
+    Schema::table('users', function (Blueprint $table) {
+        $table->dropColumn('role');
+    });
+}
+
+Затем выполните миграцию:
+bash
+
+php artisan migrate
+
+Не забудьте добавить role в свойство $fillable модели User:
+php
+
+protected $fillable = [
+    'name', 'email', 'password', 'role',
+];
+
+Шаг 2: Создание middleware CheckRole
+bash
+
+php artisan make:middleware CheckRole
+
+Файл будет создан в app/Http/Middleware/CheckRole.php. Замените его содержимое на:
+php
+
+<?php
+
+namespace App\Http\Middleware;
+
+use Closure;
+use Illuminate\Http\Request;
+use Symfony\Component\HttpFoundation\Response;
+
+class CheckRole
+{
+    public function handle(Request $request, Closure $next, string ...$roles): Response
+    {
+        if (!auth()->check() || !in_array(auth()->user()->role, $roles)) {
+            abort(403, 'Доступ запрещён');
+        }
+        return $next($request);
+    }
+}
+
+Шаг 3: Регистрация псевдонима middleware (ключевой момент Laravel 13)
+
+Откройте bootstrap/app.php, найдите ->withMiddleware(...) и добавьте псевдоним role:
+php
+
+->withMiddleware(function (Middleware $middleware): void {
+    $middleware->alias([
+        'role' => \App\Http\Middleware\CheckRole::class,
+    ]);
+})
+
+После этого вы сможете использовать role:admin или role:journalist,admin в маршрутах .
+Шаг 4: Создание моделей и миграций
+bash
+
+php artisan make:model Category -m
+php artisan make:model Article -m
+
+Файл миграции Category (database/migrations/xxxx_create_categories_table.php):
+php
+
+public function up(): void
+{
+    Schema::create('categories', function (Blueprint $table) {
+        $table->id();
+        $table->string('name');
+        $table->timestamps();
+    });
+}
+
+Файл миграции Article (database/migrations/xxxx_create_articles_table.php):
+php
+
+public function up(): void
+{
+    Schema::create('articles', function (Blueprint $table) {
+        $table->id();
+        $table->string('title');
+        $table->text('content');
+        $table->foreignId('category_id')->constrained();
+        $table->foreignId('user_id')->constrained();
+        $table->enum('status', ['published', 'blocked'])->default('published');
+        $table->timestamps();
+    });
+}
+
+Выполните миграции:
+bash
+
+php artisan migrate
+
+Добавьте связи в модели:
+
+Category.php:
+php
+
+public function articles()
+{
+    return $this->hasMany(Article::class);
+}
+
+Article.php:
+php
+
+protected $fillable = ['title', 'content', 'category_id', 'user_id', 'status'];
+
+public function category()
+{
+    return $this->belongsTo(Category::class);
+}
+
+public function user()
+{
+    return $this->belongsTo(User::class);
+}
+
+Шаг 5: Создание контроллеров
+bash
+
+php artisan make:controller NewsController
+php artisan make:controller CategoryController
+php artisan make:controller ArticleController
+php artisan make:controller AdminController
+
+NewsController.php (главная страница):
+php
+
+public function index()
+{
+    $articles = \App\Models\Article::where('status', 'published')->latest()->get();
+    return view('home', compact('articles'));
+}
+
+CategoryController.php (категории):
+php
+
+public function index()
+{
+    $category = \App\Models\Category::first();
+    $articles = $category ? $category->articles()->where('status', 'published')->get() : collect();
+    return view('category', compact('category', 'articles'));
+}
+
+ArticleController.php (страница журналиста — пока только форма):
+php
+
+public function create()
+{
+    $categories = \App\Models\Category::all();
+    return view('journalist.form', compact('categories'));
+}
+
+AdminController.php (админка):
+php
+
+public function index()
+{
+    $articles = \App\Models\Article::with('user', 'category')->latest()->get();
+    $users = \App\Models\User::all();
+    return view('admin.index', compact('articles', 'users'));
+}
+
+Шаг 6: Настройка маршрутов
+
+Откройте routes/web.php:
+php
+
+use App\Http\Controllers\NewsController;
+use App\Http\Controllers\CategoryController;
+use App\Http\Controllers\ArticleController;
+use App\Http\Controllers\AdminController;
+
+Route::middleware('auth')->group(function () {
+    Route::get('/', [NewsController::class, 'index'])->name('home');
+    Route::get('/category', [CategoryController::class, 'index'])->name('category');
+
+    Route::middleware('role:journalist,admin')->group(function () {
+        Route::get('/journalist', [ArticleController::class, 'create'])->name('journalist');
+    });
+
+    Route::middleware('role:admin')->group(function () {
+        Route::get('/admin', [AdminController::class, 'index'])->name('admin');
+    });
+});
+
+Шаг 7: Создание файлов представлений
+
+resources/views/home.blade.php (главная страница):
+blade
+
+<!DOCTYPE html>
+<html>
+<head><title>Главная</title></head>
+<body>
+    <h1>Все новости</h1>
+    @foreach($articles as $article)
+        <div>
+            <h2>{{ $article->title }}</h2>
+            <p>{{ $article->content }}</p>
+            <small>{{ $article->category->name }} | {{ $article->user->name }}</small>
+        </div>
+    @endforeach
+</body>
+</html>
+
+resources/views/category.blade.php (категория):
+blade
+
+<!DOCTYPE html>
+<html>
+<head><title>Категория</title></head>
+<body>
+    <h1>{{ $category->name ?? 'Нет категорий' }}</h1>
+    @foreach($articles as $article)
+        <div>
+            <h2>{{ $article->title }}</h2>
+            <p>{{ $article->content }}</p>
+        </div>
+    @endforeach
+</body>
+</html>
+
+resources/views/journalist/form.blade.php (форма журналиста — только вёрстка):
+blade
+
+<!DOCTYPE html>
+<html>
+<head><title>Новая статья</title></head>
+<body>
+    <h1>Написать статью</h1>
+    <form method="POST" action="#">
+        @csrf
+        <div>
+            <label>Заголовок:</label>
+            <input type="text" name="title" required>
+        </div>
+        <div>
+            <label>Категория:</label>
+            <select name="category_id">
+                @foreach($categories as $cat)
+                    <option value="{{ $cat->id }}">{{ $cat->name }}</option>
+                @endforeach
+            </select>
+        </div>
+        <div>
+            <label>Текст:</label>
+            <textarea name="content" rows="10" required></textarea>
+        </div>
+        <button type="submit">Опубликовать</button>
+    </form>
+</body>
+</html>
+
+resources/views/admin/index.blade.php (админка):
+blade
+
+<!DOCTYPE html>
+<html>
+<head><title>Админка</title></head>
+<body>
+    <h1>Управление статьями</h1>
+    <table border="1">
+        <tr><th>ID</th><th>Заголовок</th><th>Автор</th><th>Статус</th><th>Действия</th></tr>
+        @foreach($articles as $article)
+        <tr>
+            <td>{{ $article->id }}</td>
+            <td>{{ $article->title }}</td>
+            <td>{{ $article->user->name }}</td>
+            <td>{{ $article->status }}</td>
+            <td>
+                <button>Редактировать</button>
+                <button>Блокировать</button>
+                <button>Удалить</button>
+            </td>
+        </tr>
+        @endforeach
+    </table>
+
+    <h1>Управление ролями</h1>
+    <table border="1">
+        <tr><th>ID</th><th>Имя</th><th>Email</th><th>Роль</th><th>Действие</th></tr>
+        @foreach($users as $user)
+        <tr>
+            <td>{{ $user->id }}</td>
+            <td>{{ $user->name }}</td>
+            <td>{{ $user->email }}</td>
+            <td>{{ $user->role }}</td>
+            <td>
+                <form method="POST" action="#">
+                    @csrf
+                    @method('PATCH')
+                    <select name="role">
+                        <option value="user" {{ $user->role == 'user' ? 'selected' : '' }}>user</option>
+                        <option value="journalist" {{ $user->role == 'journalist' ? 'selected' : '' }}>journalist</option>
+                        <option value="admin" {{ $user->role == 'admin' ? 'selected' : '' }}>admin</option>
+                    </select>
+                    <button type="submit">Изменить</button>
+                </form>
+            </td>
+        </tr>
+        @endforeach
+    </table>
+</body>
+</html>
+
+Шаг 8: Создание тестовых пользователей
+
+Создайте сидер или добавьте вручную в tinker трёх пользователей:
+bash
+
+php artisan tinker
+
+php
+
+\App\Models\User::create(['name'=>'User', 'email'=>'user@test.ru', 'password'=>bcrypt('12345678'), 'role'=>'user']);
+\App\Models\User::create(['name'=>'Journalist', 'email'=>'jour@test.ru', 'password'=>bcrypt('12345678'), 'role'=>'journalist']);
+\App\Models\User::create(['name'=>'Admin', 'email'=>'admin@test.ru', 'password'=>bcrypt('12345678'), 'role'=>'admin']);
+
+Также создайте одну категорию и пару статей для тестирования.
+Шаг 9: Проверка результатов
+
+Запустите php artisan serve, войдите под тремя разными аккаунтами и проверьте:
+
+    user: может зайти только на / и /category, переход на /journalist или /admin возвращает 403.
+
+    journalist: может зайти на /, /category, /journalist (видит форму), переход на /admin возвращает 403.
+
+    admin: может зайти на все страницы, включая /admin.
+
+На этом базовая структура завершена. Если нужно, могу отдельно рассказать о реализации логики блокировки и удаления статей в админке или о том, как форма журналиста сохраняет данные в базу данных.
